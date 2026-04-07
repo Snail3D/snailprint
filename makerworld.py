@@ -36,6 +36,90 @@ BASE_HEADERS = {
 }
 
 
+def _parse_print_instructions(description):
+    """
+    Parse print instructions from a model description.
+    Looks for common slicer setting keywords and extracts values.
+    Returns dict of detected settings.
+    """
+    import re
+    desc_lower = description.lower()
+    instructions = {}
+
+    # Layer height
+    m = re.search(r'(\d+\.?\d*)\s*mm\s*layer', desc_lower)
+    if m:
+        instructions["layer_height"] = float(m.group(1))
+
+    # Infill
+    m = re.search(r'(\d+)\s*%?\s*infill', desc_lower)
+    if m:
+        instructions["infill_percent"] = int(m.group(1))
+    if "high infill" in desc_lower:
+        instructions.setdefault("infill_percent", 40)
+    if "low infill" in desc_lower:
+        instructions.setdefault("infill_percent", 10)
+    if "100% infill" in desc_lower or "solid infill" in desc_lower:
+        instructions["infill_percent"] = 100
+
+    # Supports
+    if "no support" in desc_lower or "without support" in desc_lower or "supportless" in desc_lower:
+        instructions["supports"] = "none"
+    elif "tree support" in desc_lower:
+        instructions["supports"] = "tree"
+    elif "support" in desc_lower and ("required" in desc_lower or "needed" in desc_lower or "enable" in desc_lower):
+        instructions["supports"] = "tree"
+
+    # Filament type
+    for fil in ["PLA", "PETG", "ABS", "ASA", "TPU", "SILK", "WOOD"]:
+        if fil.lower() in desc_lower:
+            instructions.setdefault("filament_type", fil)
+            break
+
+    # Orientation / print flat
+    if "print flat" in desc_lower or "print on the flat" in desc_lower:
+        instructions["orientation"] = "flat"
+    if "print upright" in desc_lower or "vertical" in desc_lower:
+        instructions["orientation"] = "upright"
+    if "print on side" in desc_lower or "print sideways" in desc_lower:
+        instructions["orientation"] = "side"
+
+    # Speed
+    if "slow" in desc_lower and "print" in desc_lower:
+        instructions["speed"] = "slow"
+    if "print speed" in desc_lower:
+        m = re.search(r'print\s*speed[:\s]*(\d+)', desc_lower)
+        if m:
+            instructions["print_speed_mm_s"] = int(m.group(1))
+
+    # Bed adhesion
+    if "brim" in desc_lower:
+        instructions["adhesion"] = "brim"
+    if "raft" in desc_lower:
+        instructions["adhesion"] = "raft"
+    if "no brim" in desc_lower or "no raft" in desc_lower:
+        instructions["adhesion"] = "none"
+
+    # Wall count / perimeters
+    m = re.search(r'(\d+)\s*(?:wall|perimeter|shell)', desc_lower)
+    if m:
+        instructions["walls"] = int(m.group(1))
+
+    # Temperature
+    m = re.search(r'nozzle[:\s]*(\d{3})', desc_lower)
+    if m:
+        instructions["nozzle_temp"] = int(m.group(1))
+    m = re.search(r'bed[:\s]*(\d{2,3})\s*(?:°|deg|c)', desc_lower)
+    if m:
+        instructions["bed_temp"] = int(m.group(1))
+
+    # Variable layer height
+    if "variable layer" in desc_lower:
+        instructions["variable_layer_height"] = True
+
+    return instructions
+
+
 class MakerWorld:
     def __init__(self, token=None):
         """Initialize client. Loads token from ~/.snailprint/token.json if not provided."""
@@ -129,13 +213,25 @@ class MakerWorld:
                 "has_zip_stl": inst.get("hasZipStl", False),
             })
 
+        # Extract description and parse print instructions
+        import re
+        summary_html = data.get("summary", "")
+        description = re.sub(r'<[^>]+>', ' ', summary_html)
+        description = re.sub(r'\s+', ' ', description).strip()
+
+        # Parse print instructions from description
+        print_instructions = _parse_print_instructions(description)
+
         return {
             "id": str(design_id),
             "title": data.get("title", ""),
             "author": data.get("designCreator", {}).get("name", ""),
+            "description": description,
+            "print_instructions": print_instructions,
             "default_instance_id": data.get("defaultInstanceId"),
             "profiles": profiles,
             "model_files": data.get("designExtension", {}).get("model_files", []),
+            "tags": data.get("tags", []),
             "raw": data,
         }
 
