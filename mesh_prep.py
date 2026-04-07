@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 
-def prepare_for_print(input_path, output_path=None, scale_mm=100, cut_percent=0.08):
+def prepare_for_print(input_path, output_path=None, scale_mm=100, cut_percent=0.05):
     """
     Prepare a mesh for 3D printing.
 
