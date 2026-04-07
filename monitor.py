@@ -1,19 +1,109 @@
 #!/usr/bin/env python3
 """
-Print monitor — periodic camera snapshots + Discord notifications via ClawHip.
-Schedule: first snapshot at T+10min, then every 30min, plus completion/failure.
+Print monitor — periodic 10s video clips + Discord notifications.
+Schedule: first clip at T+10min, then every 30min, plus completion/failure.
+Sends clips directly to Discord with camera footage from the printer.
 """
+import json
 import os
 import subprocess
 import tempfile
 import threading
 import time
 
+import requests
+
 CLAWHIP = os.path.expanduser("~/.cargo/bin/clawhip")
+
+# Discord config loaded from ~/.snailprint/discord.json (NOT in repo)
+_discord_config_path = os.path.expanduser("~/.snailprint/discord.json")
+
+# Printer LAN configs
+PRINTER_LAN = {
+    "22E8AJ612200029": {"ip": "192.168.1.81", "access_code": "ac555123", "name": "P3Pio"},
+    "22E8AJ5C2800915": {"ip": "192.168.1.154", "access_code": "cf972ede", "name": "P2D2"},
+}
+
+
+def _load_discord_config():
+    if os.path.exists(_discord_config_path):
+        return json.loads(open(_discord_config_path).read())
+    return None
+
+
+def _capture_clip(serial, output_path, duration=10):
+    """Capture a video clip from the printer via RTSP."""
+    printer = PRINTER_LAN.get(serial)
+    if not printer:
+        return False
+    url = f"rtsps://bblp:{printer['access_code']}@{printer['ip']}:322/streaming/live/1"
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-rtsp_transport", "tcp", "-i", url,
+             "-t", str(duration), "-c:v", "libx264", "-crf", "23",
+             "-c:a", "aac", "-movflags", "+faststart",
+             str(output_path)],
+            capture_output=True, timeout=duration + 15,
+        )
+        return result.returncode == 0 and os.path.exists(output_path)
+    except Exception as e:
+        print(f"[MONITOR] Clip capture failed: {e}")
+        return False
+
+
+def _capture_snapshot(serial, output_path):
+    """Capture a single JPEG frame from the printer via RTSP."""
+    printer = PRINTER_LAN.get(serial)
+    if not printer:
+        return False
+    url = f"rtsps://bblp:{printer['access_code']}@{printer['ip']}:322/streaming/live/1"
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-rtsp_transport", "tcp", "-i", url,
+             "-frames:v", "1", "-update", "1", str(output_path)],
+            capture_output=True, timeout=15,
+        )
+        return result.returncode == 0 and os.path.exists(output_path)
+    except Exception as e:
+        print(f"[MONITOR] Snapshot failed: {e}")
+        return False
+
+
+def _send_discord(message, file_path=None):
+    """Send a message (with optional file) to Discord."""
+    config = _load_discord_config()
+    if not config:
+        # Fallback to ClawHip text-only
+        subprocess.run([CLAWHIP, "send", "--message", message],
+                       capture_output=True, timeout=30)
+        return
+
+    data = {"content": message}
+    headers = {"Authorization": f"Bot {config['token']}"}
+    url = f"https://discord.com/api/v10/channels/{config['channel']}/messages"
+
+    try:
+        if file_path and os.path.exists(file_path):
+            ext = os.path.splitext(file_path)[1]
+            mime = "video/mp4" if ext == ".mp4" else "image/jpeg"
+            fname = f"print_update{ext}"
+            with open(file_path, "rb") as f:
+                resp = requests.post(url, headers=headers, data=data,
+                                     files={"file": (fname, f, mime)}, timeout=60)
+        else:
+            resp = requests.post(url, headers=headers, json=data, timeout=15)
+
+        if resp.status_code != 200:
+            print(f"[MONITOR] Discord API error: {resp.status_code} {resp.text[:100]}")
+    except Exception as e:
+        print(f"[MONITOR] Discord send failed: {e}")
+        # Fallback
+        subprocess.run([CLAWHIP, "send", "--message", message],
+                       capture_output=True, timeout=30)
 
 
 class PrintMonitor:
-    """Monitors a print job with camera snapshots and Discord updates."""
+    """Monitors a print job with camera clips and Discord updates."""
 
     def __init__(self, bambu_cloud, serial, job_name="print"):
         self.cloud = bambu_cloud
@@ -33,40 +123,38 @@ class PrintMonitor:
         self._stop.set()
 
     def _run(self):
-        """Monitor loop: first pic at 10min, then every 30min."""
-        # Wait 10 minutes for first snapshot
-        if self._wait(600):  # 10 minutes
-            return  # stopped
+        """Monitor loop: first clip at 10min, then every 30min."""
+        # Wait 10 minutes for first check
+        if self._wait(600):
+            return
 
-        self._take_snapshot_and_notify("just started")
+        self._send_update("just started — first layer check")
 
         # Then every 30 minutes
         while not self._stop.is_set():
-            if self._wait(1800):  # 30 minutes
-                return  # stopped
+            if self._wait(1800):
+                return
 
-            # Check if print is still going
             status = self.cloud.get_job_status(self.serial)
             if status is None:
-                self._notify("Lost connection to printer")
+                _send_discord(f"🖨️ **{self.job_name}** — Lost connection to printer")
                 return
 
             progress = status.get("progress", 0)
             time_left = status.get("time_remaining", "unknown")
+            state = status.get("gcode_state", "")
 
-            if progress >= 100:
-                self._take_snapshot_and_notify("complete! 🎉")
+            if progress >= 100 or state == "FINISH":
+                self._send_update("complete! 🎉")
                 return
-            elif status.get("status") == "idle" and progress == 0:
-                self._notify("Print appears to have stopped or failed")
+            elif state == "IDLE" and progress == 0:
+                _send_discord(f"🖨️ **{self.job_name}** — Print stopped or failed")
                 return
             else:
-                self._take_snapshot_and_notify(
-                    f"{progress}% done, {time_left} remaining"
-                )
+                self._send_update(f"{progress}% done, {time_left} remaining")
 
     def _wait(self, seconds):
-        """Wait for N seconds, checking stop flag every 10s. Returns True if stopped."""
+        """Wait N seconds, checking stop flag. Returns True if stopped."""
         elapsed = 0
         while elapsed < seconds:
             if self._stop.is_set():
@@ -75,41 +163,28 @@ class PrintMonitor:
             elapsed += 10
         return False
 
-    def _take_snapshot_and_notify(self, message):
-        """Take camera snapshot and send to Discord via ClawHip."""
-        snap_path = tempfile.mktemp(suffix=".jpg", prefix="print_snap_")
+    def _send_update(self, message):
+        """Capture a 10s video clip and send to Discord."""
+        clip_path = tempfile.mktemp(suffix=".mp4", prefix="print_clip_")
+        msg = f"🖨️ **{self.job_name}** — {message}"
 
-        has_image = self.cloud.get_camera_snapshot(self.serial, snap_path)
+        got_clip = _capture_clip(self.serial, clip_path, duration=10)
 
-        full_msg = f"🖨️ **{self.job_name}** — {message}"
-
-        if has_image and os.path.exists(snap_path):
-            self._notify_with_image(full_msg, snap_path)
-            os.unlink(snap_path)
+        if got_clip:
+            _send_discord(msg, clip_path)
+            try:
+                os.unlink(clip_path)
+            except OSError:
+                pass
         else:
-            self._notify(full_msg)
-
-    def _notify(self, message):
-        """Send a text message to Discord via ClawHip."""
-        try:
-            subprocess.run(
-                [CLAWHIP, "send", "--message", message],
-                capture_output=True,
-                timeout=30,
-            )
-        except Exception as e:
-            print(f"[MONITOR] ClawHip notify failed: {e}")
-
-    def _notify_with_image(self, message, image_path):
-        """Send a message with image to Discord via ClawHip."""
-        try:
-            subprocess.run(
-                [CLAWHIP, "emit", "print.progress",
-                 "--message", message, "--image", image_path],
-                capture_output=True,
-                timeout=30,
-            )
-        except Exception as e:
-            print(f"[MONITOR] ClawHip image notify failed: {e}")
-            # Fallback: text only
-            self._notify(message)
+            # Fallback to snapshot
+            snap_path = tempfile.mktemp(suffix=".jpg", prefix="print_snap_")
+            got_snap = _capture_snapshot(self.serial, snap_path)
+            if got_snap:
+                _send_discord(msg, snap_path)
+                try:
+                    os.unlink(snap_path)
+                except OSError:
+                    pass
+            else:
+                _send_discord(msg)
