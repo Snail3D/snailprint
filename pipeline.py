@@ -182,7 +182,7 @@ class PrintPipeline:
             self._update_job(job_id, status="printing_with_warnings",
                               warnings=[c["message"] for c in warnings])
 
-        # Submit to cloud
+        # Submit print (cloud API or local LAN fallback)
         self._update_job(job_id, status="uploading", printer=serial)
         try:
             result = self.cloud.submit_print(serial, threemf_path)
