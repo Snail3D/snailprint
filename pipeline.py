@@ -28,7 +28,7 @@ class PrintPipeline:
         self._jobs = {}
 
     def print_from_text(self, prompt, filament="PLA", color=None,
-                        scale_mm=100, printer=None, engine="spar3d"):
+                        scale_mm=50, printer=None, engine="spar3d"):
         """Full pipeline: text prompt → 3D model → slice → print."""
         job_id = str(uuid.uuid4())[:8]
         job_dir = GENERATED_DIR / job_id
@@ -69,7 +69,7 @@ class PrintPipeline:
                                       scale_mm, printer, prompt)
 
     def print_from_file(self, file_path, filament="PLA", color=None,
-                        scale_mm=100, printer=None):
+                        scale_mm=50, printer=None):
         """Pipeline: existing file → prep → slice → print."""
         job_id = str(uuid.uuid4())[:8]
         job_dir = GENERATED_DIR / job_id
