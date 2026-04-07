@@ -13,9 +13,8 @@ BAMBU_CLI = "/Applications/BambuStudio.app/Contents/MacOS/BambuStudio"
 PROFILES_DIR = Path("/Applications/BambuStudio.app/Contents/Resources/profiles/BBL")
 
 # Machine profile mapping
-# P2S may use P1S profile if not available in this BambuStudio version
 MACHINE_PROFILES = {
-    "P2S": "Bambu Lab P1S 0.4 nozzle.json",  # Fallback until BS update
+    "P2S": "Bambu Lab P2S 0.4 nozzle.json",
     "P1S": "Bambu Lab P1S 0.4 nozzle.json",
     "X1C": "Bambu Lab X1 Carbon 0.4 nozzle.json",
     "A1": "Bambu Lab A1 0.4 nozzle.json",
@@ -23,7 +22,7 @@ MACHINE_PROFILES = {
 
 # Process profile mapping
 PROCESS_PROFILES = {
-    "P2S": "0.20mm Standard @BBL P1P.json",  # Closest available
+    "P2S": "0.20mm Standard @BBL P2S.json",
     "P1S": "0.20mm Standard @BBL P1P.json",
     "X1C": "0.20mm Standard @BBL X1C.json",
     "A1": "0.20mm Standard @BBL A1.json",
