@@ -29,12 +29,8 @@ class BambuCloud:
 
     def _init_api(self, token, region=""):
         """Initialize the bambulab cloud API client."""
-        try:
-            from bambulab import BambuClient
-            self._api = BambuClient(token=token, region=region)
-        except ImportError:
-            from bambu_lab_cloud_api import BambuClient
-            self._api = BambuClient(token=token, region=region)
+        from bambulab import BambuClient
+        self._api = BambuClient(token=token)
 
     def login(self, username=None, password=None):
         """Interactive login with email + password."""
@@ -201,12 +197,20 @@ class BambuCloud:
 if __name__ == "__main__":
     cloud = BambuCloud()
     if "--login" in sys.argv:
-        cloud.login()
-    elif cloud.is_authenticated:
+        # Accept email and password as args: --login email password
+        args = sys.argv[1:]
+        idx = args.index("--login")
+        email = args[idx + 1] if len(args) > idx + 1 else None
+        pw = args[idx + 2] if len(args) > idx + 2 else None
+        cloud.login(username=email, password=pw)
+    elif "--printers" in sys.argv or cloud.is_authenticated:
+        if not cloud.is_authenticated:
+            print("Not logged in. Run: python3 bambu_cloud.py --login EMAIL PASSWORD")
+            sys.exit(1)
         printers = cloud.list_printers()
         for p in printers:
             print(f"{p['name']} ({p['serial']}) — {p['status']}")
             for slot in p.get("ams", []):
                 print(f"  Slot {slot['slot']}: {slot['type']} {slot.get('name', '')} ({slot['remaining']}%)")
     else:
-        print("Not logged in. Run: python3 bambu_cloud.py --login")
+        print("Not logged in. Run: python3 bambu_cloud.py --login EMAIL PASSWORD")
