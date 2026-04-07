@@ -121,9 +121,9 @@ class BambuCloud:
                             # ARGB hex — last 6 chars are RGB
                             color_hex = "#" + tray_color[-6:] if len(tray_color) >= 6 else "#000000"
                             remain_raw = int(tray.get("remain", 0))
-                            # remain is 0-1000; convert to percentage. -1 means empty/unknown.
+                            # remain is 0-1000; -1 means unknown (non-RFID spool, treat as available)
                             if remain_raw < 0:
-                                remaining_pct = 0
+                                remaining_pct = -1  # unknown, NOT empty
                             elif remain_raw > 100:
                                 remaining_pct = remain_raw // 10
                             else:
@@ -325,8 +325,11 @@ class BambuCloud:
                         continue
 
                 # Prefer idle printer with most remaining filament
-                if best is None or slot.get("remaining", 0) > best[2]:
-                    best = (printer["serial"], slot["slot"], slot.get("remaining", 0))
+                # -1 means unknown (non-RFID spool) — treat as 50% (available but unknown)
+                remain = slot.get("remaining", 0)
+                effective = 50 if remain < 0 else remain
+                if best is None or effective > best[2]:
+                    best = (printer["serial"], slot["slot"], effective)
 
         return (best[0], best[1]) if best else (None, None)
 

@@ -346,7 +346,7 @@ class PrintPipeline:
                            "message": f"No {filament} found in AMS. Loaded: {', '.join(loaded)}"})
         else:
             matching = [s for s in ams_slots if filament.upper() in s.get("type", "").upper()]
-            low = [s for s in matching if s.get("remaining", 0) < 10]
+            low = [s for s in matching if 0 <= s.get("remaining", 0) < 10]  # -1 = unknown, skip
             if low:
                 checks.append({"level": "warning", "check": "filament",
                                "message": f"{filament} is low ({low[0]['remaining']}% remaining)"})
