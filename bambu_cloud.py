@@ -147,6 +147,7 @@ class BambuCloud:
                 result["nozzle_diameter"] = print_data.get("nozzle_diameter", "")
                 result["mc_percent"] = print_data.get("mc_percent", 0)
                 result["mc_remaining_time"] = print_data.get("mc_remaining_time", 0)
+                result["subtask_name"] = print_data.get("subtask_name", "")
                 received.set()
             except Exception:
                 pass  # keep waiting for a valid message
@@ -228,6 +229,39 @@ class BambuCloud:
         if mqtt_data:
             return mqtt_data.get("ams", [])
         return []
+
+    def is_bed_clear(self, serial):
+        """
+        Check if the printer bed is likely clear and ready for a new print.
+
+        Returns (is_clear: bool, reason: str, last_print: str)
+
+        Logic:
+        - IDLE with no subtask → probably clear
+        - FINISH with subtask → previous print likely still on bed
+        - RUNNING/PAUSE → currently printing
+        """
+        mqtt_data = self._get_ams_mqtt(serial)
+        if mqtt_data is None:
+            return False, "unreachable", ""
+
+        state = mqtt_data.get("gcode_state", "").upper()
+        subtask = mqtt_data.get("subtask_name", "")
+        progress = mqtt_data.get("mc_percent", 0)
+
+        if state in ("RUNNING", "PREPARE"):
+            return False, "currently printing", subtask
+        elif state == "PAUSE":
+            return False, "print paused", subtask
+        elif state == "FINISH" and subtask:
+            return False, f"finished print may still be on bed: '{subtask}'", subtask
+        elif state == "IDLE" and not subtask:
+            return True, "idle, bed appears clear", ""
+        elif state == "IDLE" and subtask:
+            # IDLE but has a subtask name — might have been cleared manually
+            return True, f"idle (last print: '{subtask}' — confirm bed is clear)", subtask
+        else:
+            return True, f"state={state}, likely clear", subtask
 
     def find_filament(self, filament_type="PLA", color=None):
         """Find a printer with matching filament in AMS. Returns (serial, slot)."""
