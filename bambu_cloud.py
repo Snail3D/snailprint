@@ -6,6 +6,7 @@ print job submission, camera snapshots.
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -13,10 +14,16 @@ TOKEN_PATH = Path(os.path.expanduser("~/.snailprint/token.json"))
 PRINTERS_PATH = Path(os.path.expanduser("~/.snailprint/printers.json"))
 
 
+MQTT_BROKER = "us.mqtt.bambulab.com"
+MQTT_PORT = 8883
+
+
 class BambuCloud:
     def __init__(self):
         TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
         self._api = None
+        self._user_id = None
+        self._token = None
         self._load_token()
 
     def _load_token(self):
@@ -30,6 +37,7 @@ class BambuCloud:
     def _init_api(self, token, region=""):
         """Initialize the bambulab cloud API client."""
         from bambulab import BambuClient
+        self._token = token
         self._api = BambuClient(token=token)
 
     def login(self, username=None, password=None):
@@ -51,12 +59,124 @@ class BambuCloud:
         TOKEN_PATH.write_text(json.dumps(token_data, indent=2))
         print(f"Token saved to {TOKEN_PATH}")
 
+        self._user_id = None  # reset cached user id on fresh login
         self._init_api(token, auth.region)
         return True
 
     @property
     def is_authenticated(self):
         return self._api is not None
+
+    def _get_user_id(self):
+        """Return cached user ID, fetching from API if needed."""
+        if not self._user_id:
+            info = self._api.get_user_info()
+            self._user_id = info.get("uid") or info.get("user_id") or info.get("id", "")
+        return self._user_id
+
+    def _get_ams_mqtt(self, dev_id):
+        """
+        Connect via MQTT, send a pushall command, and return a dict with:
+          - ams: list of tray slot dicts
+          - gcode_state: printer state string (IDLE, RUNNING, FINISH, …)
+          - nozzle_diameter: float
+          - mc_percent: int
+          - mc_remaining_time: int (minutes)
+        Returns None on failure.
+        """
+        import paho.mqtt.client as mqtt
+
+        user_id = self._get_user_id()
+        topic_report = f"device/{dev_id}/report"
+        topic_request = f"device/{dev_id}/request"
+        pushall_payload = json.dumps({
+            "pushing": {"sequence_id": "0", "command": "pushall"}
+        })
+
+        result = {}
+        received = threading.Event()
+
+        def on_connect(client, userdata, flags, reason_code, properties=None):
+            # paho 2.x passes reason_code as int or ReasonCode object
+            code = reason_code if isinstance(reason_code, int) else reason_code.value
+            if code == 0:
+                client.subscribe(topic_report)
+                client.publish(topic_request, pushall_payload)
+            else:
+                received.set()  # unblock on connection failure
+
+        def on_message(client, userdata, msg):
+            try:
+                data = json.loads(msg.payload.decode())
+                print_data = data.get("print", {})
+                if not print_data:
+                    return
+
+                # AMS tray data
+                ams_slots = []
+                ams_info = print_data.get("ams", {})
+                if isinstance(ams_info, dict):
+                    for unit_idx, unit in enumerate(ams_info.get("ams", [])):
+                        for tray in unit.get("tray", []):
+                            tray_color = tray.get("tray_color", "000000FF")
+                            # ARGB hex — last 6 chars are RGB
+                            color_hex = "#" + tray_color[-6:] if len(tray_color) >= 6 else "#000000"
+                            remain_raw = int(tray.get("remain", 0))
+                            # remain is 0-1000; convert to percentage. -1 means empty/unknown.
+                            if remain_raw < 0:
+                                remaining_pct = 0
+                            elif remain_raw > 100:
+                                remaining_pct = remain_raw // 10
+                            else:
+                                remaining_pct = remain_raw
+                            slot = {
+                                "slot": int(tray.get("id", 0)),
+                                "ams_unit": unit_idx,
+                                "type": tray.get("tray_type", ""),
+                                "color": tray_color,
+                                "color_hex": color_hex,
+                                "remaining": remaining_pct,
+                                "name": tray.get("tray_sub_brands", ""),
+                                "nozzle_temp_min": tray.get("nozzle_temp_min", 0),
+                                "nozzle_temp_max": tray.get("nozzle_temp_max", 0),
+                            }
+                            ams_slots.append(slot)
+
+                result["ams"] = ams_slots
+                result["gcode_state"] = print_data.get("gcode_state", "")
+                result["nozzle_diameter"] = print_data.get("nozzle_diameter", "")
+                result["mc_percent"] = print_data.get("mc_percent", 0)
+                result["mc_remaining_time"] = print_data.get("mc_remaining_time", 0)
+                received.set()
+            except Exception:
+                pass  # keep waiting for a valid message
+
+        def on_disconnect(client, userdata, disconnect_flags, reason_code=None, properties=None):
+            received.set()
+
+        try:
+            mqttc = mqtt.Client(
+                mqtt.CallbackAPIVersion.VERSION2,
+                protocol=mqtt.MQTTv311,
+                clean_session=True,
+            )
+            mqttc.username_pw_set(f"u_{user_id}", self._token)
+            mqttc.tls_set()
+            mqttc.reconnect_delay_set(min_delay=1, max_delay=5)
+            mqttc.on_connect = on_connect
+            mqttc.on_message = on_message
+            mqttc.on_disconnect = on_disconnect
+
+            mqttc.connect(MQTT_BROKER, MQTT_PORT, keepalive=5)
+            mqttc.loop_start()
+            received.wait(timeout=15)
+            mqttc.loop_stop()
+            mqttc.disconnect()
+        except Exception as e:
+            print(f"  MQTT error for {dev_id}: {e}")
+            return None
+
+        return result if result else None
 
     def list_printers(self):
         """Return list of printers with status and AMS info."""
@@ -66,34 +186,35 @@ class BambuCloud:
         devices = self._api.get_devices()
         printers = []
         for dev in devices:
+            dev_id = dev.get("dev_id", "")
             printer = {
-                "serial": dev.get("dev_id", ""),
+                "serial": dev_id,
                 "name": dev.get("name", "Unknown"),
                 "model": dev.get("dev_model_name", ""),
-                "status": "idle",
+                "status": "unknown",
                 "ams": [],
             }
 
-            # Get print status
-            try:
-                status = self._api.get_print_status(dev["dev_id"])
-                if status:
-                    progress = status.get("mc_percent", 0)
-                    if progress > 0 and progress < 100:
-                        printer["status"] = "printing"
-                        printer["progress"] = progress
-                    elif status.get("stg_cur", 0) == 0:
-                        printer["status"] = "idle"
-                    printer["print_status"] = status
-            except Exception:
-                printer["status"] = "unknown"
+            # Get AMS + live state via MQTT (single round-trip for everything)
+            print(f"  Fetching MQTT data for {printer['name']} ({dev_id})...")
+            mqtt_data = self._get_ams_mqtt(dev_id)
+            if mqtt_data:
+                printer["ams"] = mqtt_data.get("ams", [])
+                printer["nozzle_diameter"] = mqtt_data.get("nozzle_diameter", "")
 
-            # Get AMS inventory
-            try:
-                ams_data = self._get_ams(dev["dev_id"])
-                printer["ams"] = ams_data
-            except Exception:
-                pass
+                gcode_state = mqtt_data.get("gcode_state", "").upper()
+                progress = mqtt_data.get("mc_percent", 0)
+                if gcode_state in ("RUNNING", "PAUSE"):
+                    printer["status"] = "printing"
+                    printer["progress"] = progress
+                    printer["time_remaining"] = self._format_time(mqtt_data.get("mc_remaining_time", 0))
+                elif gcode_state in ("IDLE", "FINISH", ""):
+                    printer["status"] = "idle"
+                else:
+                    printer["status"] = gcode_state.lower()
+                printer["gcode_state"] = gcode_state
+            else:
+                printer["status"] = "unreachable"
 
             printers.append(printer)
 
@@ -102,25 +223,11 @@ class BambuCloud:
         return printers
 
     def _get_ams(self, dev_id):
-        """Get AMS slot inventory for a printer."""
-        status = self._api.get_print_status(dev_id)
-        ams_slots = []
-
-        ams_info = status.get("ams", {})
-        if isinstance(ams_info, dict):
-            for unit in ams_info.get("ams", []):
-                for tray in unit.get("tray", []):
-                    slot = {
-                        "slot": int(tray.get("id", 0)),
-                        "type": tray.get("tray_type", ""),
-                        "color": tray.get("tray_color", ""),
-                        "color_hex": "#" + tray.get("tray_color", "000000")[-6:],
-                        "remaining": int(tray.get("remain", 0)),
-                        "name": tray.get("tray_sub_brands", ""),
-                    }
-                    ams_slots.append(slot)
-
-        return ams_slots
+        """Get AMS slot inventory for a printer (delegates to MQTT)."""
+        mqtt_data = self._get_ams_mqtt(dev_id)
+        if mqtt_data:
+            return mqtt_data.get("ams", [])
+        return []
 
     def find_filament(self, filament_type="PLA", color=None):
         """Find a printer with matching filament in AMS. Returns (serial, slot)."""
