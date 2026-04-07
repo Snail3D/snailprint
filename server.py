@@ -60,74 +60,66 @@ class PrintHandler(SimpleHTTPRequestHandler):
         body = self._read_body()
         mode = body.get("mode", "generate")
 
+        filament = body.get("filament", "PLA")
+        color = body.get("color")
+        scale_mm = body.get("scale_mm", 50)
+        printer = body.get("printer", "auto")
+        engine = body.get("engine", "spar3d")
+
         # Launch in background thread so we don't block
-        def run():
+        def run(jid):
             try:
+                real_id = None
                 if mode == "generate":
-                    pipeline.print_from_text(
+                    real_id = pipeline.print_from_text(
                         prompt=body.get("prompt", ""),
-                        filament=body.get("filament", "PLA"),
-                        color=body.get("color"),
-                        scale_mm=body.get("scale_mm", 100),
-                        printer=body.get("printer", "auto"),
-                        engine=body.get("engine", "spar3d"),
+                        filament=filament, color=color,
+                        scale_mm=scale_mm, printer=printer, engine=engine,
                     )
                 elif mode == "file":
-                    pipeline.print_from_file(
+                    real_id = pipeline.print_from_file(
                         file_path=body.get("file", ""),
-                        filament=body.get("filament", "PLA"),
-                        color=body.get("color"),
-                        scale_mm=body.get("scale_mm", 100),
-                        printer=body.get("printer", "auto"),
+                        filament=filament, color=color,
+                        scale_mm=scale_mm, printer=printer,
                     )
                 elif mode == "image":
-                    pipeline.print_from_image(
+                    real_id = pipeline.print_from_image(
                         image_path=body.get("image", ""),
-                        filament=body.get("filament", "PLA"),
-                        color=body.get("color"),
-                        scale_mm=body.get("scale_mm", 50),
-                        printer=body.get("printer", "auto"),
-                        engine=body.get("engine", "spar3d"),
+                        filament=filament, color=color,
+                        scale_mm=scale_mm, printer=printer, engine=engine,
                     )
                 elif mode == "photos":
-                    pipeline.print_from_photos(
+                    real_id = pipeline.print_from_photos(
                         image_paths=body.get("images", []),
-                        filament=body.get("filament", "PLA"),
-                        color=body.get("color"),
-                        scale_mm=body.get("scale_mm", 50),
-                        printer=body.get("printer", "auto"),
+                        filament=filament, color=color,
+                        scale_mm=scale_mm, printer=printer,
                     )
                 elif mode == "makerworld":
-                    pipeline.print_from_makerworld(
+                    real_id = pipeline.print_from_makerworld(
                         query=body.get("query"),
                         model_id=body.get("makerworld_id"),
-                        filament=body.get("filament", "PLA"),
-                        color=body.get("color"),
-                        printer=body.get("printer", "auto"),
+                        filament=filament, color=color, printer=printer,
                     )
+                # Link the pre-job to the real pipeline job
+                if real_id and real_id != jid:
+                    real_job = pipeline.get_job(real_id)
+                    if real_job:
+                        pipeline._jobs[jid] = pipeline._jobs.get(real_id, {})
+                        pipeline._jobs[jid]["job_id"] = jid
             except Exception as e:
                 print(f"[PIPELINE] Error: {e}")
+                import traceback; traceback.print_exc()
+                pipeline._update_job(jid, status="failed", error=str(e))
 
         # Create job synchronously to get ID, then run pipeline in background
-        job_id = None
-        if mode == "generate":
-            # Pre-create job
-            import uuid, time
-            job_id = str(uuid.uuid4())[:8]
-            pipeline._update_job(job_id, status="starting", mode=mode,
-                                  prompt=body.get("prompt", ""))
-        elif mode == "file":
-            import uuid
-            job_id = str(uuid.uuid4())[:8]
-            pipeline._update_job(job_id, status="starting", mode=mode,
-                                  file=body.get("file", ""))
-        elif mode == "makerworld":
-            import uuid
-            job_id = str(uuid.uuid4())[:8]
-            pipeline._update_job(job_id, status="starting", mode=mode,
-                                  query=body.get("query", ""))
+        import uuid as _uuid
+        job_id = str(_uuid.uuid4())[:8]
+        pipeline._update_job(job_id, status="starting", mode=mode,
+                              prompt=body.get("prompt", ""),
+                              file=body.get("file", ""),
+                              query=body.get("query", ""))
 
-        t = threading.Thread(target=run, daemon=True)
+        t = threading.Thread(target=run, args=(job_id,), daemon=True)
         t.start()
 
         self._json({"success": True, "job_id": job_id, "status": "starting"})
