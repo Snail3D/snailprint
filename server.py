@@ -64,7 +64,7 @@ class PrintHandler(SimpleHTTPRequestHandler):
         color = body.get("color")
         scale_mm = body.get("scale_mm", 50)
         printer = body.get("printer", "auto")
-        engine = body.get("engine", "spar3d")
+        engine = body.get("engine", "hunyuan")
 
         # Launch in background thread so we don't block
         def run(jid):
