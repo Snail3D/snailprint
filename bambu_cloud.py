@@ -495,6 +495,22 @@ class BambuCloud:
         threemf_path = str(threemf_path)
         filename = Path(threemf_path).name
 
+        # ---- Step 0: Clear any lingering error state ----
+        import time as _time
+        try:
+            self._send_local_mqtt_command(ip, access_code, serial, {
+                "print": {"sequence_id": "0", "command": "clean_print_error",
+                          "subtask_id": "", "print_error": 0}
+            })
+            self._send_local_mqtt_command(ip, access_code, serial, {
+                "system": {"sequence_id": "0", "command": "uiop",
+                           "name": "print_error", "action": "close",
+                           "source": 1, "type": "dialog", "err": "00000000"}
+            })
+            _time.sleep(2)
+        except Exception:
+            pass  # best effort — printer may already be clean
+
         # ---- Step 1: Upload via FTPS (port 990, implicit TLS) ----
         try:
             filename = self._upload_ftps(ip, access_code, threemf_path)
