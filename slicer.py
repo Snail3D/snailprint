@@ -41,9 +41,10 @@ PROCESS_PROFILES = {
 }
 
 # Filament type to profile mapping
+# Filament profiles — use P2S-specific when available (correct temps + settings)
 FILAMENT_PROFILES = {
-    "PLA": "Generic PLA @base.json",
-    "PETG": "Generic PETG @base.json",
+    "PLA": "Generic PLA @BBL A1.json",
+    "PETG": "Generic PETG @BBL P2S.json",
     "TPU": "Generic TPU @base.json",
     "ABS": "Generic ABS @base.json",
     "ASA": "Generic ASA @base.json",
