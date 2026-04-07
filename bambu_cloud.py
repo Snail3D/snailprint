@@ -300,17 +300,29 @@ class BambuCloud:
         return result
 
     def get_job_status(self, serial):
-        """Get current print job status for a printer."""
-        status = self._api.get_print_status(serial)
-        if not status:
+        """Get current print job status via MQTT."""
+        mqtt_data = self._get_ams_mqtt(serial)
+        if mqtt_data is None:
             return None
 
+        state = mqtt_data.get("gcode_state", "").upper()
+        progress = mqtt_data.get("mc_percent", 0)
+
+        if state in ("RUNNING", "PREPARE"):
+            status = "printing"
+        elif state == "PAUSE":
+            status = "paused"
+        elif state == "FINISH":
+            status = "complete"
+        else:
+            status = "idle"
+
         return {
-            "progress": status.get("mc_percent", 0),
-            "layer": f"{status.get('layer_num', 0)}/{status.get('total_layer_num', 0)}",
-            "time_remaining": self._format_time(status.get("mc_remaining_time", 0)),
-            "status": "printing" if status.get("mc_percent", 0) > 0 else "idle",
-            "subtask_name": status.get("subtask_name", ""),
+            "progress": progress,
+            "time_remaining": self._format_time(mqtt_data.get("mc_remaining_time", 0)),
+            "status": status,
+            "subtask_name": mqtt_data.get("subtask_name", ""),
+            "gcode_state": state,
         }
 
     def get_camera_snapshot(self, serial, output_path):
