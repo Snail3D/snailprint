@@ -105,7 +105,7 @@ class PrintMonitor:
         try:
             subprocess.run(
                 [CLAWHIP, "emit", "print.progress",
-                 f"message={message}", f"image={image_path}"],
+                 "--message", message, "--image", image_path],
                 capture_output=True,
                 timeout=30,
             )
