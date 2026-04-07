@@ -94,25 +94,37 @@ class PrintPipeline:
 
         self._update_job(job_id, status="searching_makerworld", query=query)
 
-        # Download model
+        # Search MakerWorld
+        from makerworld import MakerWorld
+        mw = MakerWorld()
+
         if model_id is None:
-            results = makerworld.search(query, limit=1)
+            results = mw.search(query, limit=5, printer="N7")
             if not results:
                 self._update_job(job_id, status="failed", error=f"No MakerWorld results for '{query}'")
                 return job_id
             model_id = results[0]["id"]
             self._update_job(job_id, makerworld_model=results[0])
 
+        # Smart download: try pre-sliced 3MF for P2S first
         self._update_job(job_id, status="downloading")
-        file_path = makerworld.download(model_id, output_dir=str(job_dir))
+        file_path, is_presliced = mw.download(
+            model_id, output_dir=str(job_dir),
+            printer="N7", nozzle=0.4,
+            filament_type=filament,
+        )
 
-        # If it's a pre-sliced 3MF, use it directly
-        if file_path.endswith(".3mf"):
-            return self._submit_print(job_id, file_path, filament, color, printer,
-                                       f"MakerWorld #{model_id}")
+        job_name = f"MakerWorld #{model_id}"
 
+        if is_presliced:
+            # Pre-sliced 3MF matches our printer — send straight to print
+            self._update_job(job_id, status="presliced_match",
+                             detail="Using pre-sliced profile from MakerWorld")
+            return self._submit_print(job_id, file_path, filament, color, printer, job_name)
+
+        # No matching profile — slice it ourselves
         return self._finish_pipeline(job_id, job_dir, file_path, filament, color,
-                                      100, printer, f"MakerWorld #{model_id}")
+                                      100, printer, job_name)
 
     def _finish_pipeline(self, job_id, job_dir, mesh_path, filament, color,
                           scale_mm, printer, job_name):
