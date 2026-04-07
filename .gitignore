@@ -6,3 +6,4 @@ generated/
 *.3mf
 *.stl
 .snailprint/
+.omc/
