@@ -68,6 +68,97 @@ class PrintPipeline:
         return self._finish_pipeline(job_id, job_dir, mesh_path, filament, color,
                                       scale_mm, printer, prompt)
 
+    def print_from_photos(self, image_paths, filament="PLA", color=None,
+                          scale_mm=50, printer=None):
+        """Pipeline: multiple reference photos → multi-view 3D reconstruction → slice → print.
+        Great for busts, figurines of real people/objects from photos."""
+        job_id = str(uuid.uuid4())[:8]
+        job_dir = GENERATED_DIR / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+
+        self._update_job(job_id, status="reconstructing", images=image_paths)
+
+        # Read images and convert to base64
+        import base64
+        images_b64 = []
+        for p in image_paths:
+            with open(p, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
+                ext = Path(p).suffix.lower().strip(".")
+                mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png"}.get(ext, "jpeg")
+                images_b64.append(f"data:image/{mime};base64,{b64}")
+
+        resp = requests.post(f"{SNAILSTUDIO_URL}/api/3d/generate", json={
+            "mode": "multiview",
+            "images": images_b64,
+            "options": {
+                "format": "stl",
+                "scale_mm": scale_mm,
+                "texture": False,
+                "watertight": True,
+            },
+        }, timeout=10)
+        data = resp.json()
+        gen_job_id = data.get("job_id")
+
+        if not gen_job_id:
+            self._update_job(job_id, status="failed", error="Multi-view reconstruction failed to start")
+            return job_id
+
+        self._update_job(job_id, status="reconstructing_3d", gen_job_id=gen_job_id)
+        mesh_path = self._wait_for_generation(gen_job_id, job_dir)
+
+        if mesh_path is None:
+            self._update_job(job_id, status="failed", error="Multi-view reconstruction failed")
+            return job_id
+
+        return self._finish_pipeline(job_id, job_dir, mesh_path, filament, color,
+                                      scale_mm, printer, "photo_reconstruction")
+
+    def print_from_image(self, image_path, filament="PLA", color=None,
+                         scale_mm=50, printer=None, engine="spar3d"):
+        """Pipeline: single reference image → 3D model → slice → print."""
+        job_id = str(uuid.uuid4())[:8]
+        job_dir = GENERATED_DIR / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+
+        self._update_job(job_id, status="generating", image=image_path)
+
+        import base64
+        with open(image_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+            ext = Path(image_path).suffix.lower().strip(".")
+            mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png"}.get(ext, "jpeg")
+            image_b64 = f"data:image/{mime};base64,{b64}"
+
+        resp = requests.post(f"{SNAILSTUDIO_URL}/api/3d/generate", json={
+            "mode": "image",
+            "image": image_b64,
+            "options": {
+                "engine": engine,
+                "format": "stl",
+                "scale_mm": scale_mm,
+                "texture": False,
+                "watertight": True,
+            },
+        }, timeout=10)
+        data = resp.json()
+        gen_job_id = data.get("job_id")
+
+        if not gen_job_id:
+            self._update_job(job_id, status="failed", error="Image-to-3D failed to start")
+            return job_id
+
+        self._update_job(job_id, status="generating_3d", gen_job_id=gen_job_id)
+        mesh_path = self._wait_for_generation(gen_job_id, job_dir)
+
+        if mesh_path is None:
+            self._update_job(job_id, status="failed", error="Image-to-3D generation failed")
+            return job_id
+
+        return self._finish_pipeline(job_id, job_dir, mesh_path, filament, color,
+                                      scale_mm, printer, Path(image_path).stem)
+
     def print_from_file(self, file_path, filament="PLA", color=None,
                         scale_mm=50, printer=None):
         """Pipeline: existing file → prep → slice → print."""

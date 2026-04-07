@@ -80,6 +80,23 @@ class PrintHandler(SimpleHTTPRequestHandler):
                         scale_mm=body.get("scale_mm", 100),
                         printer=body.get("printer", "auto"),
                     )
+                elif mode == "image":
+                    pipeline.print_from_image(
+                        image_path=body.get("image", ""),
+                        filament=body.get("filament", "PLA"),
+                        color=body.get("color"),
+                        scale_mm=body.get("scale_mm", 50),
+                        printer=body.get("printer", "auto"),
+                        engine=body.get("engine", "spar3d"),
+                    )
+                elif mode == "photos":
+                    pipeline.print_from_photos(
+                        image_paths=body.get("images", []),
+                        filament=body.get("filament", "PLA"),
+                        color=body.get("color"),
+                        scale_mm=body.get("scale_mm", 50),
+                        printer=body.get("printer", "auto"),
+                    )
                 elif mode == "makerworld":
                     pipeline.print_from_makerworld(
                         query=body.get("query"),
