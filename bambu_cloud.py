@@ -148,6 +148,8 @@ class BambuCloud:
                 result["mc_percent"] = print_data.get("mc_percent", 0)
                 result["mc_remaining_time"] = print_data.get("mc_remaining_time", 0)
                 result["subtask_name"] = print_data.get("subtask_name", "")
+                result["layer_num"] = print_data.get("layer_num", 0)
+                result["total_layer_num"] = print_data.get("total_layer_num", 0)
                 received.set()
             except Exception:
                 pass  # keep waiting for a valid message
@@ -289,15 +291,148 @@ class BambuCloud:
         return (best[0], best[1]) if best else (None, None)
 
     def submit_print(self, serial, threemf_path):
-        """Upload 3MF and start print on specified printer."""
-        if not self.is_authenticated:
-            raise RuntimeError("Not authenticated")
+        """
+        Upload 3MF and start print on specified printer.
 
-        result = self._api.send_print(
-            dev_id=serial,
-            file_path=threemf_path,
-        )
-        return result
+        Strategy:
+        1. Try cloud API first (works when printers are cloud-connected).
+        2. If cloud fails, fall back to local LAN mode:
+           a. Upload .3mf via FTPS (port 990) to the printer.
+           b. Send print command via local MQTT (port 8883).
+        """
+        # --- Attempt 1: Cloud API ---
+        if self.is_authenticated:
+            try:
+                result = self._api.send_print(
+                    dev_id=serial,
+                    file_path=threemf_path,
+                )
+                print(f"  Cloud submit succeeded for {serial}")
+                return {"method": "cloud", "result": result}
+            except Exception as cloud_err:
+                print(f"  Cloud submit failed ({cloud_err}), trying local LAN mode...")
+
+        # --- Attempt 2: Local LAN (FTP upload + MQTT print command) ---
+        printer_cfg = self._get_printer_config(serial)
+        if not printer_cfg:
+            raise RuntimeError(
+                f"No local config for printer {serial}. "
+                "Cloud API also failed. Cannot submit print."
+            )
+
+        ip = printer_cfg["ip"]
+        access_code = printer_cfg["access_code"]
+
+        return self._submit_print_local(serial, ip, access_code, threemf_path)
+
+    def _submit_print_local(self, serial, ip, access_code, threemf_path):
+        """
+        Submit a print job via local LAN: FTPS upload + MQTT print command.
+
+        The Bambu P2S in LAN mode exposes:
+          - FTPS on port 990 (implicit TLS)
+          - MQTT on port 8883 (TLS, user=bblp, pass=access_code)
+        """
+        import ssl
+        from ftplib import FTP_TLS
+
+        threemf_path = str(threemf_path)
+        filename = Path(threemf_path).name
+
+        # ---- Step 1: Upload via FTPS (port 990, implicit TLS) ----
+        print(f"  Uploading {filename} to {ip} via FTPS...")
+        try:
+            ftp = FTP_TLS()
+            # Implicit FTPS: connect with TLS from the start on port 990
+            ftp.connect(host=ip, port=990, timeout=30)
+            ftp.login(user="bblp", passwd=access_code)
+            ftp.prot_p()  # enable data channel encryption
+
+            with open(threemf_path, "rb") as f:
+                ftp.storbinary(f"STOR {filename}", f)
+            print(f"  Upload complete: {filename}")
+            ftp.quit()
+        except Exception as e:
+            # Try plain FTP on port 21 as a second fallback
+            print(f"  FTPS port 990 failed ({e}), trying plain FTP port 21...")
+            try:
+                from bambulab import LocalFTPClient
+                with LocalFTPClient(ip, access_code, use_tls=False) as ftp_client:
+                    upload_result = ftp_client.upload_file(threemf_path)
+                    filename = upload_result["filename"]
+                    print(f"  Plain FTP upload complete: {filename}")
+            except Exception as e2:
+                raise RuntimeError(f"FTP upload failed (FTPS: {e}, FTP: {e2})")
+
+        # ---- Step 2: Send print command via local MQTT (port 8883) ----
+        print(f"  Sending print command to {ip} via local MQTT...")
+        import paho.mqtt.client as mqtt
+
+        print_payload = {
+            "print": {
+                "sequence_id": "0",
+                "command": "project_file",
+                "param": "Metadata/plate_1.gcode",
+                "subtask_name": filename.replace(".3mf", ""),
+                "url": f"ftp://{filename}",
+                "bed_type": "auto",
+                "timelapse": False,
+                "bed_levelling": True,
+                "flow_cali": True,
+                "vibration_cali": True,
+                "layer_inspect": True,
+                "use_ams": True,
+                "project_id": "0",
+                "profile_id": "0",
+                "task_id": "0",
+                "subtask_id": "0",
+                "ams_mapping": "",
+                "md5": "",
+            }
+        }
+
+        topic_request = f"device/{serial}/request"
+        publish_ok = threading.Event()
+        connect_err = [None]
+
+        def on_connect(client, userdata, flags, reason_code, properties=None):
+            code = reason_code if isinstance(reason_code, int) else reason_code.value
+            if code == 0:
+                client.publish(topic_request, json.dumps(print_payload))
+                print(f"  Print command published to {topic_request}")
+                publish_ok.set()
+            else:
+                connect_err[0] = f"MQTT connect failed (code {code})"
+                publish_ok.set()
+
+        try:
+            mqttc = mqtt.Client(
+                mqtt.CallbackAPIVersion.VERSION2,
+                protocol=mqtt.MQTTv311,
+                clean_session=True,
+            )
+            mqttc.username_pw_set("bblp", access_code)
+            mqttc.tls_set(cert_reqs=ssl.CERT_NONE)
+            mqttc.tls_insecure_set(True)
+            mqttc.on_connect = on_connect
+
+            mqttc.connect(ip, 8883, keepalive=10)
+            mqttc.loop_start()
+            publish_ok.wait(timeout=10)
+            mqttc.loop_stop()
+            mqttc.disconnect()
+        except Exception as e:
+            raise RuntimeError(f"Local MQTT print command failed: {e}")
+
+        if connect_err[0]:
+            raise RuntimeError(connect_err[0])
+
+        return {
+            "method": "local_lan",
+            "ip": ip,
+            "filename": filename,
+            "serial": serial,
+        }
 
     def get_job_status(self, serial):
         """Get current print job status via MQTT."""
@@ -323,6 +458,8 @@ class BambuCloud:
             "status": status,
             "subtask_name": mqtt_data.get("subtask_name", ""),
             "gcode_state": state,
+            "layer_num": mqtt_data.get("layer_num", 0),
+            "total_layer_num": mqtt_data.get("total_layer_num", 0),
         }
 
     def get_camera_snapshot(self, serial, output_path):

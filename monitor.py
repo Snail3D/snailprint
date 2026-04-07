@@ -3,7 +3,9 @@
 Print monitor — periodic 10s video clips + Discord notifications.
 Schedule: first clip at T+10min, then every 30min, plus completion/failure.
 Sends clips directly to Discord with camera footage from the printer.
+Includes first-layer vision check via local Gemma 4 model.
 """
+import base64
 import json
 import os
 import subprocess
@@ -12,6 +14,14 @@ import threading
 import time
 
 import requests
+
+VISION_API_URL = "http://localhost:8080/v1/chat/completions"
+FIRST_LAYER_PROMPT = (
+    "This is a photo of a 3D printer bed after the first few layers of printing. "
+    "Analyze the print quality. Look for: poor bed adhesion, warping or lifting at "
+    "corners/edges, gaps in extrusion lines, stringing/spaghetti, uneven first layer, "
+    "layer shifting. Rate the print as GOOD, WARNING, or FAIL. Explain what you see."
+)
 
 CLAWHIP = os.path.expanduser("~/.cargo/bin/clawhip")
 
@@ -123,12 +133,12 @@ class PrintMonitor:
         self._stop.set()
 
     def _run(self):
-        """Monitor loop: first clip at 10min, then every 30min."""
+        """Monitor loop: first-layer vision check at 10min, then clips every 30min."""
         # Wait 10 minutes for first check
         if self._wait(600):
             return
 
-        self._send_update("just started — first layer check")
+        self._first_layer_check()
 
         # Then every 30 minutes
         while not self._stop.is_set():
@@ -152,6 +162,73 @@ class PrintMonitor:
                 return
             else:
                 self._send_update(f"{progress}% done, {time_left} remaining")
+
+    def _first_layer_check(self):
+        """Grab a snapshot, run vision analysis, and send results to Discord."""
+        # Also send the usual clip update
+        self._send_update("just started — first layer check")
+
+        # Grab a still frame for vision analysis
+        snap_path = tempfile.mktemp(suffix=".jpg", prefix="first_layer_")
+        if not _capture_snapshot(self.serial, snap_path):
+            print("[MONITOR] First layer check: failed to capture snapshot")
+            return
+
+        # Send to local vision model
+        try:
+            with open(snap_path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
+
+            resp = requests.post(VISION_API_URL, json={
+                "model": "default",
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": FIRST_LAYER_PROMPT},
+                    {"type": "image_url", "image_url": {
+                        "url": f"data:image/jpeg;base64,{b64}"
+                    }},
+                ]}],
+                "max_tokens": 300,
+            }, timeout=60)
+
+            if resp.status_code != 200:
+                print(f"[MONITOR] Vision API error: {resp.status_code}")
+                return
+
+            analysis = resp.json()["choices"][0]["message"]["content"]
+            print(f"[MONITOR] Vision analysis: {analysis[:120]}...")
+
+            # Determine rating from the response
+            analysis_upper = analysis.upper()
+            if "FAIL" in analysis_upper:
+                rating = "FAIL"
+            elif "WARNING" in analysis_upper:
+                rating = "WARNING"
+            else:
+                rating = "GOOD"
+
+            if rating == "GOOD":
+                msg = (f"\U0001f5a8\ufe0f **{self.job_name}** — "
+                       f"First layer check passed \u2705\n\n{analysis}")
+            else:
+                emoji = "\U0001f6a8" if rating == "FAIL" else "\u26a0\ufe0f"
+                msg = (f"{emoji} **{self.job_name}** — "
+                       f"First layer **{rating}**\n\n{analysis}")
+
+            _send_discord(msg, snap_path)
+
+        except Exception as e:
+            print(f"[MONITOR] Vision check failed: {e}")
+            # Still send the snapshot without analysis
+            _send_discord(
+                f"\U0001f5a8\ufe0f **{self.job_name}** — First layer snapshot "
+                f"(vision check unavailable)",
+                snap_path,
+            )
+        finally:
+            try:
+                os.unlink(snap_path)
+            except OSError:
+                pass
 
     def _wait(self, seconds):
         """Wait N seconds, checking stop flag. Returns True if stopped."""
