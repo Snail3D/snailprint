@@ -505,6 +505,11 @@ class BambuCloud:
             raise
 
         # ---- Step 2: Send print command via local MQTT (port 8883) ----
+        # NOTE: The P2S firmware (post-Jan 2025) requires the url to use the
+        # "ftp:///" scheme (triple slash, no host).  "file:///sdcard/..." is
+        # rejected with "ERROR STATE" even when the printer is visually idle.
+        # Confirmed by live MQTT diagnostic: ftp:///filename.3mf → SUCCESS,
+        # all other schemes → FAIL reason=ERROR STATE.
         print(f"  Sending print command to {ip} via local MQTT...")
         print_payload = {
             "print": {
@@ -512,19 +517,19 @@ class BambuCloud:
                 "command": "project_file",
                 "param": "Metadata/plate_1.gcode",
                 "subtask_name": filename.replace(".3mf", ""),
-                "url": f"ftp://{filename}",
+                "url": f"ftp:///{filename}",
                 "bed_type": "auto",
                 "timelapse": False,
-                "bed_levelling": True,
+                "bed_leveling": True,
                 "flow_cali": True,
                 "vibration_cali": True,
                 "layer_inspect": True,
-                "use_ams": True,
+                "use_ams": False,
+                "ams_mapping": [0],
                 "project_id": "0",
                 "profile_id": "0",
                 "task_id": "0",
                 "subtask_id": "0",
-                "ams_mapping": "",
                 "md5": "",
             }
         }
