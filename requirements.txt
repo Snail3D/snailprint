@@ -1,0 +1,6 @@
+bambu-lab-cloud-api
+requests
+trimesh
+shapely
+mapbox-earcut
+numpy
