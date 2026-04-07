@@ -34,12 +34,18 @@ class PrintPipeline:
         job_dir = GENERATED_DIR / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
 
+        # Enhance prompt for 3D-print-friendly geometry
+        print_prompt = (
+            f"{prompt}, 3D printable design, solid base, no thin overhangs, "
+            f"no floating parts, minimal supports needed, all surfaces above 45 degree overhang angle, "
+            f"compact form suitable for FDM 3D printing"
+        )
         self._update_job(job_id, status="generating", prompt=prompt)
 
         # Step 1: Generate 3D model via SnailStudio
         resp = requests.post(f"{SNAILSTUDIO_URL}/api/3d/generate", json={
             "mode": "text",
-            "prompt": prompt,
+            "prompt": print_prompt,
             "options": {
                 "engine": engine,
                 "format": "stl",
