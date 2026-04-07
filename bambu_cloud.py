@@ -36,23 +36,26 @@ class BambuCloud:
             from bambu_lab_cloud_api import BambuClient
             self._api = BambuClient(token=token, region=region)
 
-    def login(self):
-        """Interactive OAuth login — opens browser."""
-        try:
-            from bambulab import BambuAuthenticator
-            auth = BambuAuthenticator()
-        except ImportError:
-            from bambu_lab_cloud_api import BambuAuthenticator
-            auth = BambuAuthenticator()
+    def login(self, username=None, password=None):
+        """Interactive login with email + password."""
+        from bambulab import BambuAuthenticator
+        auth = BambuAuthenticator()
+
+        if not username:
+            username = input("Bambu Cloud email: ").strip()
+        if not password:
+            import getpass
+            password = getpass.getpass("Bambu Cloud password: ")
 
         print("Logging in to Bambu Cloud...")
-        token_data = auth.login()
+        token = auth.login(username, password)
 
-        # Save token
+        # Save token + region
+        token_data = {"token": token, "region": auth.region}
         TOKEN_PATH.write_text(json.dumps(token_data, indent=2))
         print(f"Token saved to {TOKEN_PATH}")
 
-        self._init_api(token_data.get("token"), token_data.get("region", ""))
+        self._init_api(token, auth.region)
         return True
 
     @property
