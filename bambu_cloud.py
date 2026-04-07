@@ -314,15 +314,44 @@ class BambuCloud:
         }
 
     def get_camera_snapshot(self, serial, output_path):
-        """Save a camera snapshot from the printer."""
+        """Save a camera snapshot from the printer via RTSP (LAN mode required)."""
+        import subprocess
+
+        printer = self._get_printer_config(serial)
+        if not printer:
+            print(f"Camera: no config for {serial}")
+            return False
+
+        ip = printer.get("ip", "")
+        code = printer.get("access_code", "")
+        if not ip or not code:
+            print(f"Camera: missing IP or access code for {serial}")
+            return False
+
+        url = f"rtsps://bblp:{code}@{ip}:322/streaming/live/1"
         try:
-            frame = self._api.get_camera_frame(serial)
-            if frame:
-                Path(output_path).write_bytes(frame)
+            result = subprocess.run(
+                ["ffmpeg", "-y", "-rtsp_transport", "tcp", "-i", url,
+                 "-frames:v", "1", "-update", "1", str(output_path)],
+                capture_output=True, timeout=15,
+            )
+            if result.returncode == 0 and Path(output_path).exists():
+                print(f"Camera: snapshot saved ({Path(output_path).stat().st_size // 1024}KB)")
                 return True
+            else:
+                print(f"Camera: ffmpeg failed (rc={result.returncode})")
         except Exception as e:
-            print(f"Camera snapshot failed: {e}")
+            print(f"Camera: {e}")
         return False
+
+    def _get_printer_config(self, serial):
+        """Get printer IP and access code. Uses cached data or PRINTERS_PATH."""
+        # Known printer configs (LAN mode)
+        configs = {
+            "22E8AJ612200029": {"ip": "192.168.1.81", "access_code": "ac555123", "name": "P3Pio"},
+            "22E8AJ5C2800915": {"ip": "192.168.1.154", "access_code": "cf972ede", "name": "P2D2"},
+        }
+        return configs.get(serial)
 
     @staticmethod
     def _format_time(minutes):

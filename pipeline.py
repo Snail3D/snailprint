@@ -257,6 +257,19 @@ class PrintPipeline:
                 checks.append({"level": "ok", "check": "filament",
                                "message": f"{filament} loaded and ready"})
 
+        # Camera snapshot of bed
+        snap_path = str(job_dir / "bed_check.jpg") if hasattr(self, '_current_job_dir') else "/tmp/snailprint_bed_check.jpg"
+        import tempfile
+        snap_path = tempfile.mktemp(suffix=".jpg", prefix="bed_check_")
+        has_image = self.cloud.get_camera_snapshot(serial, snap_path)
+        if has_image:
+            checks.append({"level": "ok", "check": "camera",
+                           "message": f"Bed snapshot saved: {snap_path}",
+                           "image": snap_path})
+        else:
+            checks.append({"level": "warning", "check": "camera",
+                           "message": "Could not get camera snapshot (LAN mode required)"})
+
         # HMS health warnings
         hms = mqtt_data.get("hms", [])
         if hms:
