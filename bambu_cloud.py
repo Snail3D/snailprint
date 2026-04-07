@@ -524,7 +524,7 @@ class BambuCloud:
                 "flow_cali": True,
                 "vibration_cali": True,
                 "layer_inspect": True,
-                "use_ams": False,
+                "use_ams": True,
                 "ams_mapping": [0],
                 "project_id": "0",
                 "profile_id": "0",
