@@ -168,10 +168,9 @@ def slice_stl(stl_path, output_path=None, printer_model="P2S",
         "--export-3mf", str(output_path),
     ]
 
-    # Tree supports via process settings override
-    if tree_supports:
-        override = _create_support_override(process_file, tree_supports=True)
-        cmd[cmd.index("--load-settings") + 1] = f"{machine_file};{override}"
+    # Always create override for bed type + optional tree supports
+    override = _create_support_override(process_file, tree_supports=tree_supports, filament_type=filament_type)
+    cmd[cmd.index("--load-settings") + 1] = f"{machine_file};{override}"
 
     cmd.append(stl_path)
 
@@ -198,14 +197,26 @@ def slice_stl(stl_path, output_path=None, printer_model="P2S",
     return str(output_path)
 
 
-def _create_support_override(base_process_file, tree_supports=True):
-    """Create a temporary process file with tree support settings."""
+FILAMENT_BED_TYPE = {
+    "PLA": "Textured PEI Plate",
+    "PETG": "Textured PEI Plate",
+    "ABS": "Textured PEI Plate",
+    "ASA": "Textured PEI Plate",
+    "TPU": "Textured PEI Plate",
+}
+
+def _create_support_override(base_process_file, tree_supports=True, filament_type="PLA"):
+    """Create a temporary process file with tree support settings and correct bed type."""
     base = json.loads(Path(base_process_file).read_text())
 
     if tree_supports:
         base["support_type"] = "tree(auto)"
         base["enable_support"] = "1"
         base["support_on_build_plate_only"] = "1"
+
+    # Set bed type based on filament
+    bed = FILAMENT_BED_TYPE.get(filament_type.upper(), "Cool Plate")
+    base["curr_bed_type"] = bed
 
     tmp = Path(tempfile.mktemp(suffix=".json", prefix="snailprint_process_"))
     tmp.write_text(json.dumps(base, indent=2))
