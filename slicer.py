@@ -205,7 +205,7 @@ def _create_support_override(base_process_file, tree_supports=True):
     if tree_supports:
         base["support_type"] = "tree(auto)"
         base["enable_support"] = "1"
-        base["support_on_build_plate_only"] = "0"
+        base["support_on_build_plate_only"] = "1"
 
     tmp = Path(tempfile.mktemp(suffix=".json", prefix="snailprint_process_"))
     tmp.write_text(json.dumps(base, indent=2))
