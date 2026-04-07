@@ -151,7 +151,7 @@ class PrintPipeline:
         return self._submit_print(job_id, threemf_path, filament, color, printer, job_name)
 
     def _submit_print(self, job_id, threemf_path, filament, color, printer, job_name):
-        """Find printer, submit job, start monitor."""
+        """Find printer, run safety checks, submit job, start monitor."""
         self._update_job(job_id, status="finding_printer")
 
         # Find best printer
@@ -163,6 +163,24 @@ class PrintPipeline:
                 self._update_job(job_id, status="failed",
                                   error=f"No printer found with {color or ''} {filament}")
                 return job_id
+
+        # === PRE-PRINT SAFETY CHECK ===
+        self._update_job(job_id, status="safety_check", printer=serial)
+        checks = self._run_safety_checks(serial, filament)
+        self._update_job(job_id, safety_checks=checks)
+
+        blockers = [c for c in checks if c["level"] == "blocker"]
+        warnings = [c for c in checks if c["level"] == "warning"]
+
+        if blockers:
+            reasons = "; ".join(c["message"] for c in blockers)
+            self._update_job(job_id, status="blocked",
+                              error=f"Cannot print: {reasons}")
+            return job_id
+
+        if warnings:
+            self._update_job(job_id, status="printing_with_warnings",
+                              warnings=[c["message"] for c in warnings])
 
         # Submit to cloud
         self._update_job(job_id, status="uploading", printer=serial)
@@ -179,6 +197,80 @@ class PrintPipeline:
         self._update_job(job_id, monitor=monitor)
 
         return job_id
+
+    def _run_safety_checks(self, serial, filament):
+        """
+        Pre-print safety checks via MQTT telemetry.
+        Returns list of {level: 'blocker'|'warning'|'ok', check: str, message: str}
+        """
+        checks = []
+        mqtt_data = self.cloud._get_ams_mqtt(serial)
+
+        if mqtt_data is None:
+            checks.append({"level": "blocker", "check": "connectivity",
+                           "message": "Cannot reach printer"})
+            return checks
+
+        state = mqtt_data.get("gcode_state", "").upper()
+        subtask = mqtt_data.get("subtask_name", "")
+
+        # Bed clear check
+        if state in ("RUNNING", "PREPARE"):
+            checks.append({"level": "blocker", "check": "bed_clear",
+                           "message": f"Printer is currently printing: '{subtask}'"})
+        elif state == "PAUSE":
+            checks.append({"level": "blocker", "check": "bed_clear",
+                           "message": f"Printer has a paused print: '{subtask}'"})
+        elif state == "FINISH" and subtask:
+            checks.append({"level": "warning", "check": "bed_clear",
+                           "message": f"Previous print '{subtask}' may still be on bed"})
+        else:
+            checks.append({"level": "ok", "check": "bed_clear",
+                           "message": "Bed appears clear"})
+
+        # Nozzle check
+        nozzle = mqtt_data.get("nozzle_diameter", "")
+        if nozzle and float(nozzle) != 0.4:
+            checks.append({"level": "warning", "check": "nozzle",
+                           "message": f"Nozzle is {nozzle}mm (expected 0.4mm)"})
+        else:
+            checks.append({"level": "ok", "check": "nozzle",
+                           "message": f"Nozzle: {nozzle}mm"})
+
+        # Filament check
+        ams_slots = mqtt_data.get("ams", [])
+        has_filament = any(
+            filament.upper() in slot.get("type", "").upper()
+            for slot in ams_slots
+        )
+        if not has_filament:
+            loaded = [f"{s['type']} ({s['remaining']}%)" for s in ams_slots if s.get("type")]
+            checks.append({"level": "warning", "check": "filament",
+                           "message": f"No {filament} found in AMS. Loaded: {', '.join(loaded)}"})
+        else:
+            matching = [s for s in ams_slots if filament.upper() in s.get("type", "").upper()]
+            low = [s for s in matching if s.get("remaining", 0) < 10]
+            if low:
+                checks.append({"level": "warning", "check": "filament",
+                               "message": f"{filament} is low ({low[0]['remaining']}% remaining)"})
+            else:
+                checks.append({"level": "ok", "check": "filament",
+                               "message": f"{filament} loaded and ready"})
+
+        # HMS health warnings
+        hms = mqtt_data.get("hms", [])
+        if hms:
+            for h in hms[:3]:
+                checks.append({"level": "warning", "check": "hms",
+                               "message": f"Printer warning: {h}"})
+
+        # Print error check
+        err = mqtt_data.get("mc_print_error_code", "0")
+        if str(err) != "0":
+            checks.append({"level": "warning", "check": "error",
+                           "message": f"Printer error code: {err}"})
+
+        return checks
 
     def _wait_for_generation(self, gen_job_id, job_dir, timeout=600):
         """Poll SnailStudio for 3D generation completion."""
